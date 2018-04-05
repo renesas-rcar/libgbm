@@ -105,9 +105,12 @@ static void gbm_kms_bo_destroy(struct gbm_bo *_bo)
 	return;
 }
 
-static struct gbm_bo *gbm_kms_bo_create(struct gbm_device *gbm,
-					uint32_t width, uint32_t height,
-					uint32_t format, uint32_t usage)
+static struct gbm_bo *
+gbm_kms_bo_create(struct gbm_device *gbm,
+		  uint32_t width, uint32_t height,
+		  uint32_t format, uint32_t usage,
+		  const uint64_t *modifiers,
+		  const unsigned int count)
 {
 	struct gbm_kms_device *dev = (struct gbm_kms_device*)gbm;
 	struct gbm_kms_bo *bo;
@@ -313,11 +316,11 @@ static int gbm_kms_surface_set_bo(struct gbm_kms_surface *surface, int n, void *
 
 static void gbm_kms_surface_destroy(struct gbm_surface *_surface);
 
-static struct gbm_surface *gbm_kms_surface_create(struct gbm_device *gbm,
-						  uint32_t width,
-						  uint32_t height,
-						  uint32_t format,
-						  uint32_t flags)
+static struct gbm_surface *
+gbm_kms_surface_create(struct gbm_device *gbm,
+		       uint32_t width, uint32_t height,
+		       uint32_t format, uint32_t flags,
+		       const uint64_t *modifiers, const unsigned count)
 {
 	struct gbm_kms_surface *surface;
 	GBM_DEBUG("%s: %s: %d\n", __FILE__, __func__, __LINE__);
