@@ -54,6 +54,10 @@
 #  define GBM_DEBUG(s, x...)	{ }
 #endif
 
+#ifndef DRM_FORMAT_MOD_INVALID
+#define DRM_FORMAT_MOD_INVALID ((1ULL<<56) - 1)
+#endif
+
 /*
  * Destroy gbm backend
  */
@@ -82,6 +86,14 @@ static int gbm_kms_is_format_supported(struct gbm_device *gbm,
 	}
 }
 
+static int
+gbm_kms_get_format_modifier_plane_count(struct gbm_device *gbm,
+                                        uint32_t format,
+                                        uint64_t modifier)
+{
+	return -1;
+}
+
 static void gbm_kms_bo_destroy(struct gbm_bo *_bo)
 {
 	struct gbm_kms_bo *bo = (struct gbm_kms_bo*)_bo;
@@ -105,9 +117,12 @@ static void gbm_kms_bo_destroy(struct gbm_bo *_bo)
 	return;
 }
 
-static struct gbm_bo *gbm_kms_bo_create(struct gbm_device *gbm,
-					uint32_t width, uint32_t height,
-					uint32_t format, uint32_t usage)
+static struct gbm_bo *
+gbm_kms_bo_create(struct gbm_device *gbm,
+		  uint32_t width, uint32_t height,
+		  uint32_t format, uint32_t usage,
+		  const uint64_t *modifiers,
+		  const unsigned int count)
 {
 	struct gbm_kms_device *dev = (struct gbm_kms_device*)gbm;
 	struct gbm_kms_bo *bo;
@@ -280,6 +295,37 @@ static struct gbm_bo *gbm_kms_bo_import(struct gbm_device *gbm,
 	return (struct gbm_bo*)bo;
 }
 
+static int
+gbm_kms_bo_get_planes(struct gbm_bo *_bo)
+{
+	return 1;
+}
+
+static union gbm_bo_handle
+gbm_kms_bo_get_handle_for_plane(struct gbm_bo *_bo, int plane)
+{
+	return _bo->handle;
+}
+
+static uint32_t
+gbm_kms_bo_get_stride(struct gbm_bo *_bo, int plane)
+{
+	return _bo->stride;
+}
+
+static uint32_t
+gbm_kms_bo_get_offset(struct gbm_bo *_bo, int plane)
+{
+	return 0;
+}
+
+static uint64_t
+gbm_kms_bo_get_modifier(struct gbm_bo *_bo)
+{
+	errno = ENOSYS;
+	return DRM_FORMAT_MOD_INVALID;
+}
+
 static int gbm_kms_surface_set_bo(struct gbm_kms_surface *surface, int n, void *addr, int fd, uint32_t stride)
 {
 	struct gbm_kms_bo *bo;
@@ -313,11 +359,11 @@ static int gbm_kms_surface_set_bo(struct gbm_kms_surface *surface, int n, void *
 
 static void gbm_kms_surface_destroy(struct gbm_surface *_surface);
 
-static struct gbm_surface *gbm_kms_surface_create(struct gbm_device *gbm,
-						  uint32_t width,
-						  uint32_t height,
-						  uint32_t format,
-						  uint32_t flags)
+static struct gbm_surface *
+gbm_kms_surface_create(struct gbm_device *gbm,
+		       uint32_t width, uint32_t height,
+		       uint32_t format, uint32_t flags,
+		       const uint64_t *modifiers, const unsigned count)
 {
 	struct gbm_kms_surface *surface;
 	GBM_DEBUG("%s: %s: %d\n", __FILE__, __func__, __LINE__);
@@ -387,11 +433,17 @@ struct gbm_device kms_gbm_device = {
 
 	.destroy = gbm_kms_destroy,
 	.is_format_supported = gbm_kms_is_format_supported,
+	.get_format_modifier_plane_count = gbm_kms_get_format_modifier_plane_count,
 
 	.bo_create = gbm_kms_bo_create,
 	.bo_import = gbm_kms_bo_import,
 	.bo_write = gbm_kms_bo_write,
 	.bo_destroy = gbm_kms_bo_destroy,
+	.bo_get_planes = gbm_kms_bo_get_planes,
+	.bo_get_handle = gbm_kms_bo_get_handle_for_plane,
+	.bo_get_stride = gbm_kms_bo_get_stride,
+	.bo_get_offset = gbm_kms_bo_get_offset,
+	.bo_get_modifier = gbm_kms_bo_get_modifier,
 
 	.surface_create = gbm_kms_surface_create,
 	.surface_lock_front_buffer = gbm_kms_surface_lock_front_buffer,
