@@ -81,6 +81,17 @@ gbm_format_canonicalize(uint32_t gbm_format)
  */
 static void gbm_kms_destroy(struct gbm_device *gbm)
 {
+	struct gbm_kms_bo_handle_list *node, *tmp_node;
+	struct gbm_kms_device *dev  = (struct gbm_kms_device *) gbm;
+
+	node = TAILQ_FIRST(&dev->bo_handle_list);
+	while (node) {
+		tmp_node = TAILQ_NEXT(node, entry);
+		free(node);
+		node = tmp_node;
+	}
+	TAILQ_INIT(&dev->bo_handle_list);
+
 	free(gbm);
 }
 
@@ -150,7 +161,60 @@ static void gbm_kms_bo_map_unref(struct gbm_kms_bo *bo)
 	}
 }
 
-static void gbm_kms_bo_close_handle(int fd, uint32_t handle)
+static struct gbm_kms_bo_handle_list *lookup_bo_handle(
+	struct tailq_head bo_handle_list, uint32_t handle)
+{
+	struct gbm_kms_bo_handle_list *node;
+
+	TAILQ_FOREACH(node, &bo_handle_list, entry) {
+		if (node->handle == handle)
+			return node;
+	}
+
+	return NULL;
+}
+
+static struct gbm_kms_bo_handle_list *create_new_node(
+						uint32_t handle,
+						bool allocated_handle)
+{
+	struct gbm_kms_bo_handle_list *node;
+
+	node = calloc(1, sizeof(struct gbm_kms_bo_handle_list));
+	memset(node, 0, sizeof(struct gbm_kms_bo_handle_list));
+
+	node->handle = handle;
+	node->ref_count = 1;
+	node->allocated_handle = allocated_handle;
+
+	return node;
+}
+
+static void gbm_kms_dev_ref_bo_handle(struct gbm_kms_device *dev,
+				      uint32_t handle,
+				      bool allocated_handle)
+{
+	struct gbm_kms_bo_handle_list *node;
+
+	node = lookup_bo_handle(dev->bo_handle_list, handle);
+	/* handle already present in the list, increase ref count */
+        if (node) {
+		node->ref_count++;
+		return;
+	}
+
+	/* handle not present in the list, create a new entry and
+	 * and append to the list
+	 */
+	node = create_new_node(handle, allocated_handle);
+
+	TAILQ_INSERT_TAIL(&dev->bo_handle_list, node, entry);
+
+	return;
+}
+
+
+static void close_bo_handle(int fd, uint32_t handle)
 {
 	struct drm_gem_close gem_close = { .handle = handle };
 
@@ -160,6 +224,35 @@ static void gbm_kms_bo_close_handle(int fd, uint32_t handle)
 	if (drmIoctl(fd, DRM_IOCTL_GEM_CLOSE, &gem_close))
 		GBM_DEBUG("%s: %s: DRM_IOCTL_GEM_CLOSE failed. (%s)\n",
 			  __FILE__, __func__, strerror(errno));
+}
+
+static void gbm_kms_dev_unref_bo_handle(struct gbm_kms_device *dev,
+					uint32_t handle)
+{
+	struct gbm_kms_bo_handle_list *node;
+
+	node = lookup_bo_handle(dev->bo_handle_list, handle);
+	if (!node) {
+		GBM_DEBUG("%s:%s: error: handle not found in the list\n",
+			  __FILE__, __func__);
+		return;
+	}
+
+	/* decrease the ref count */
+	if (node->ref_count)
+		node->ref_count--;
+
+	/* if ref count is 0, close the bo handle (if allocated) and
+	 * remove the entry from the list
+	 */
+	if (!node->ref_count) {
+		if (node->allocated_handle)
+			close_bo_handle(dev->base.fd, node->handle);
+
+		TAILQ_REMOVE(&dev->bo_handle_list, node, entry);
+
+		free(node);
+	}
 }
 
 static void gbm_kms_bo_destroy(struct gbm_bo *_bo)
@@ -173,20 +266,23 @@ static void gbm_kms_bo_destroy(struct gbm_bo *_bo)
 		if (bo->addr)
 			kms_bo_unmap(bo->bo);
 
+		gbm_kms_dev_unref_bo_handle((struct gbm_kms_device*)bo->base.gbm,
+					    bo->base.handle.u32);
+
 		if (bo->fd)
 			close(bo->fd);
 
 		if (bo->bo)
 			kms_bo_destroy(&bo->bo);
-	} else if (bo->allocated_handle) {
+	} else {
 		if (bo->num_planes == 1) {
-			gbm_kms_bo_close_handle(bo->base.gbm->fd,
-						bo->base.handle.u32);
+			gbm_kms_dev_unref_bo_handle((struct gbm_kms_device*)bo->base.gbm,
+						    bo->base.handle.u32);
 		} else {
 			int i;
 			for (i = 0; i < bo->num_planes; i++) {
-				gbm_kms_bo_close_handle(bo->base.gbm->fd,
-							bo->planes[i].handle);
+				gbm_kms_dev_unref_bo_handle((struct gbm_kms_device*)bo->base.gbm,
+							    bo->planes[i].handle);
 			}
 		}
 	}
@@ -250,6 +346,9 @@ static struct gbm_bo *gbm_kms_bo_create(struct gbm_device *gbm,
 
 	kms_bo_get_prop(bo->bo, KMS_HANDLE, &bo->base.handle.u32);
 	kms_bo_get_prop(bo->bo, KMS_PITCH, &bo->base.stride);
+
+	/* add the active bo handle to the list */
+        gbm_kms_dev_ref_bo_handle(dev, bo->base.handle.u32, false);
 
 	bo->size = bo->base.stride * bo->base.height;
 	bo->num_planes = 1;
@@ -395,6 +494,7 @@ static struct gbm_kms_bo* gbm_kms_import_wl_buffer(struct gbm_device *gbm,
 						   void *_buffer)
 {
 	struct wl_kms_buffer *buffer;
+	struct gbm_kms_device *dev = (struct gbm_kms_device*)gbm;
 	struct gbm_kms_bo *bo;
 
 	buffer = wayland_kms_buffer_get((struct wl_resource*)_buffer);
@@ -421,6 +521,9 @@ static struct gbm_kms_bo* gbm_kms_import_wl_buffer(struct gbm_device *gbm,
 		for (i = 0; i < buffer->num_planes; i++)  {
 			bo->planes[i].handle = buffer->planes[i].handle;
 			bo->planes[i].stride = buffer->planes[i].stride;
+			/* add the active bo handle to the list */
+			gbm_kms_dev_ref_bo_handle(dev, buffer->planes[i].handle,
+						  false);
 		}
 	} else {
 		bo->num_planes = 1;
@@ -454,7 +557,9 @@ static struct gbm_kms_bo* gbm_kms_import_fd(struct gbm_device *gbm,
 	bo->base.stride = fd_data->stride;
 	bo->base.handle.u32 = handle;
 	bo->num_planes = 1;
-	bo->allocated_handle = true;
+
+	/* add the active bo handle to the list */
+	gbm_kms_dev_ref_bo_handle(dev, handle, true);
 
 	return bo;
 }
@@ -498,12 +603,14 @@ static struct gbm_kms_bo *gbm_kms_import_fd_modifier(struct gbm_device *gbm,
 	bo->base.format = gbm_format_canonicalize(fd_data->format);
 	bo->base.stride = fd_data->strides[0];
 	bo->base.handle.u32 = handle[0];
-	bo->allocated_handle = true;
 
 	bo->num_planes = fd_data->num_fds;
 	for (i = 0; i < fd_data->num_fds; i++)  {
 		bo->planes[i].handle = handle[i];
 		bo->planes[i].stride = fd_data->strides[i];
+
+		/* add the active bo handle to the list */
+		gbm_kms_dev_ref_bo_handle(dev, handle[i], true);
 	}
 
 	return bo;
@@ -685,6 +792,8 @@ static struct gbm_device *kms_device_create(int fd)
 
 	dev->base = kms_gbm_device;
 	dev->base.fd = fd;
+
+	TAILQ_INIT(&dev->bo_handle_list);
 
 	if (kms_create(fd, &dev->kms)) {
 		free(dev);

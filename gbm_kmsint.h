@@ -30,12 +30,25 @@
 
 #include <libkms.h>
 #include <stdbool.h>
+#include <sys/queue.h>
 
 #include "gbmint.h"
+
+struct gbm_kms_bo_handle_list {
+	uint32_t handle;
+	unsigned int ref_count;
+	bool allocated_handle;
+
+	TAILQ_ENTRY(gbm_kms_bo_handle_list) entry;
+};
+
+TAILQ_HEAD(tailq_head, gbm_kms_bo_handle_list);
 
 struct gbm_kms_device {
 	struct gbm_device base;
 	struct kms_driver *kms;
+
+	struct tailq_head bo_handle_list;
 };
 
 #define MAX_PLANES	3
@@ -55,7 +68,6 @@ struct gbm_kms_bo {
 
 	uint32_t size;
 	bool allocated;
-	bool allocated_handle;
 
 	// for multi-planar support
 	int num_planes;
